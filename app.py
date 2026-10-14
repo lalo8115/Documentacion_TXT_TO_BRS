@@ -5,6 +5,7 @@ import io
 import smtplib
 from email.message import EmailMessage
 import openpyxl
+import re 
 
 # 1. Configuración de página y credenciales
 st.set_page_config(page_title="Generador de BRS", page_icon="⚙️")
@@ -30,20 +31,32 @@ if archivos_subidos:
         # Genera un input text por cada archivo subido
         nombres_tablas[archivo.name] = st.text_input(f"Nombre para '{archivo.name}':", key=archivo.name)
 
+
 def analizar_sql_con_gemini(sql_query):
-    """Llama a Gemini para extraer la estructura exacta requerida para la plantilla."""
-    model = genai.GenerativeModel('gemini-1.5-flash-001')
+    """Busca un modelo disponible, llama a Gemini y extrae el JSON de forma segura."""
+    
+    # 1. Autodescubrimiento del modelo disponible
+    modelo_elegido = 'gemini-pro' # Modelo de respaldo por defecto
+    for m in genai.list_models():
+        if 'generateContent' in m.supported_generation_methods:
+            # Preferimos los modelos 1.5 si están disponibles
+            if '1.5' in m.name:
+                modelo_elegido = m.name.replace('models/', '')
+                break
+            
+    st.info(f"Modelo detectado y en uso: {modelo_elegido}")
+    model = genai.GenerativeModel(modelo_elegido)
     
     prompt = f"""
     Eres un Analista de Datos experto. Analiza el siguiente SQL y extrae la información para un BRS.
-    Devuelve ÚNICAMENTE un JSON válido con esta estructura exacta:
+    Devuelve ÚNICAMENTE un JSON válido con esta estructura exacta. NO agregues comillas invertidas ni la palabra json.
     {{
       "campos": [
         {{
           "columna": "nombre del campo en el select",
           "termino_negocio": "explicación en lenguaje de negocio",
-          "descripcion": "explicación detallada de la regla, lógica o CASE. Si es un campo directo, repite el termino_negocio.",
-          "fuente_datos": "nombre de la tabla origen de este campo"
+          "descripcion": "explicación detallada de la regla, lógica o CASE. Si es directo, repite el termino_negocio.",
+          "fuente_datos": "nombre de la tabla origen"
         }}
       ],
       "tablas_origen": ["TABLA_1", "TABLA_2"]
@@ -53,11 +66,16 @@ def analizar_sql_con_gemini(sql_query):
     {sql_query}
     """
     
-    response = model.generate_content(
-        prompt, 
-        generation_config=genai.GenerationConfig(response_mime_type="application/json")
-    )
-    return json.loads(response.text)
+    # 2. Generación sin forzar el mime_type (para compatibilidad máxima con cualquier modelo)
+    response = model.generate_content(prompt)
+    
+    # 3. Limpieza estricta del JSON
+    # A veces Gemini responde con ```json ... ```, esto limpia cualquier residuo markdown
+    texto_limpio = response.text.strip()
+    if texto_limpio.startswith('```'):
+        texto_limpio = re.sub(r'^```(?:json)?|```$', '', texto_limpio, flags=re.IGNORECASE).strip()
+        
+    return json.loads(texto_limpio)
 
 def llenar_plantilla_excel(datos_gemini, nombre_reporte, sql_texto):
     """Abre la plantilla, inyecta los datos en las hojas requeridas y retorna los bytes."""
