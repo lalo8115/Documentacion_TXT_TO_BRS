@@ -47,11 +47,8 @@ else:
 def analizar_sql_con_gemini(sql_query):
     """
     Llama a la API de Gemini por HTTP directo (REST).
-    Garantiza que se envíe EXACTAMENTE 1 petición sin reintentos ocultos de librerías.
+    Incluye manejo de servidores ocupados (503) y cambio automático de modelo si hay saturación.
     """
-    modelo = "gemini-3.8-flash"
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{modelo}:generateContent?key={GEMINI_API_KEY}"
-    
     prompt = f"""
     Eres un Analista de Datos experto. Analiza el siguiente SQL y extrae la información para un BRS.
     Identifica únicamente los campos del SELECT principal.
@@ -82,29 +79,50 @@ def analizar_sql_con_gemini(sql_query):
     
     headers = {"Content-Type": "application/json"}
     
-    # Hacemos la petición con un timeout amplio (120 seg) por si el SQL es muy largo
-    for intento in range(3):
+    # Lista de modelos: si el principal está saturado (503), prueba con las variantes
+    modelos_disponibles = [
+        "gemini-3.8-flash",
+        "gemini-3.8-flash-lite",
+        "gemini-3.8-pro"
+    ]
+    
+    for intento in range(4):
+        # Rotamos o mantenemos el modelo según el intento
+        modelo_actual = modelos_disponibles[intento % len(modelos_disponibles)]
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{modelo_actual}:generateContent?key={GEMINI_API_KEY}"
+        
         response = requests.post(url, headers=headers, json=payload, timeout=120)
         
+        # Caso 1: Éxito total
         if response.status_code == 200:
-             resultado = response.json()
-             texto_respuesta = resultado["candidates"][0]["content"]["parts"][0]["text"].strip()
-             
-             # Limpieza preventiva por si incluye bloques markdown
-             if texto_respuesta.startswith("```"):
-                 texto_respuesta = re.sub(r"^```(?:json)?|```$", "", texto_respuesta, flags=re.IGNORECASE).strip()
-                 
-             return json.loads(texto_respuesta)
+            resultado = response.json()
+            texto_respuesta = resultado["candidates"][0]["content"]["parts"][0]["text"].strip()
             
+            if texto_respuesta.startswith("```"):
+                texto_respuesta = re.sub(r"^```(?:json)?|```$", "", texto_respuesta, flags=re.IGNORECASE).strip()
+                
+            return json.loads(texto_respuesta)
+            
+        # Caso 2: Servidor de Google saturado (503 / 500) -> Esperar 8 seg y probar siguiente
+        elif response.status_code in [500, 502, 503, 504]:
+            espera_servidor = 8 * (intento + 1)
+            st.warning(f"⚠️ El servidor de `{modelo_actual}` tiene alta demanda en Google (503). Reintentando en {espera_servidor}s (Intento {intento+1}/4)...")
+            time.sleep(espera_servidor)
+            
+        # Caso 3: El modelo de respaldo no existe en tu cuenta (404) -> Saltar de inmediato al siguiente sin esperar
+        elif response.status_code == 404:
+            continue
+            
+        # Caso 4: Límite de cuota por minuto (429)
         elif response.status_code == 429:
-            # Si Google pide esperar porque enviaste varios archivos seguidos, lee el tiempo exacto
             tiempo_espera = 25
-            st.warning(f"⏳ Cuota por minuto alcanzada. Esperando {tiempo_espera} segundos para continuar automáticamente (Intento {intento+1}/3)...")
+            st.warning(f"⏳ Cuota por minuto alcanzada. Esperando {tiempo_espera}s para continuar (Intento {intento+1}/4)...")
             time.sleep(tiempo_espera)
+            
         else:
             raise Exception(f"Error HTTP {response.status_code}: {response.text}")
             
-    raise Exception("El servidor de Google sigue ocupado tras 3 intentos. Espera 1 minuto e intenta de nuevo.")
+    raise Exception("Los servidores de Google están experimentando saturación temporal tras varios intentos. Por favor intenta en un par de minutos.")
 
 
 def copiar_estilo_fila(ws, fila_origen, fila_destino, max_col=5):
