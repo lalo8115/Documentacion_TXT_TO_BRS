@@ -32,7 +32,7 @@ if archivos_subidos:
 
 def analizar_sql_con_gemini(sql_query):
     """Llama a Gemini para extraer la estructura exacta requerida para la plantilla."""
-    model = genai.GenerativeModel('gemini-1.5-flash-latest')
+    model = genai.GenerativeModel('gemini-1.5-flash-001')
     
     prompt = f"""
     Eres un Analista de Datos experto. Analiza el siguiente SQL y extrae la información para un BRS.
