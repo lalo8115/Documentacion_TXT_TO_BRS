@@ -33,18 +33,30 @@ if archivos_subidos:
 
 
 def analizar_sql_con_gemini(sql_query):
-    """Busca un modelo disponible, llama a Gemini y extrae el JSON de forma segura."""
+    """Busca dinámicamente los modelos activos en tu cuenta y extrae el JSON."""
     
-    # 1. Autodescubrimiento del modelo disponible
-    modelo_elegido = 'gemini-pro' # Modelo de respaldo por defecto
+    # 1. Obtener la lista real de modelos que Google permite usar hoy con tu API Key
+    modelos_validos = []
     for m in genai.list_models():
         if 'generateContent' in m.supported_generation_methods:
-            # Preferimos los modelos 1.5 si están disponibles
-            if '1.5' in m.name:
-                modelo_elegido = m.name.replace('models/', '')
-                break
+            modelos_validos.append(m.name)
             
-    st.info(f"Modelo detectado y en uso: {modelo_elegido}")
+    if not modelos_validos:
+        raise Exception("Error crítico: Tu API Key no tiene permisos para usar modelos de texto.")
+        
+    # 2. Elegir el mejor modelo disponible (buscamos 'flash' por velocidad, luego 'pro')
+    modelo_elegido = modelos_validos[0] # Tomamos el primero de la lista como base
+    for m_name in modelos_validos:
+        if 'flash' in m_name.lower():
+            modelo_elegido = m_name
+            break # Si encontramos un flash, nos quedamos con ese
+        elif 'pro' in m_name.lower() and 'vision' not in m_name.lower():
+            modelo_elegido = m_name
+            
+    # Esto te mostrará en la web qué modelo encontró y seleccionó para que lo compruebes
+    st.info(f"✅ Modelo auto-detectado y en uso: {modelo_elegido}")
+    
+    # 3. Inicializar el modelo con el nombre exacto que Google nos acaba de dar
     model = genai.GenerativeModel(modelo_elegido)
     
     prompt = f"""
@@ -66,12 +78,11 @@ def analizar_sql_con_gemini(sql_query):
     {sql_query}
     """
     
-    # 2. Generación sin forzar el mime_type (para compatibilidad máxima con cualquier modelo)
+    # 4. Generación y limpieza segura del JSON
     response = model.generate_content(prompt)
-    
-    # 3. Limpieza estricta del JSON
-    # A veces Gemini responde con ```json ... ```, esto limpia cualquier residuo markdown
     texto_limpio = response.text.strip()
+    
+    # Quitar cualquier formato Markdown que Gemini pueda agregar por accidente
     if texto_limpio.startswith('```'):
         texto_limpio = re.sub(r'^```(?:json)?|```$', '', texto_limpio, flags=re.IGNORECASE).strip()
         
