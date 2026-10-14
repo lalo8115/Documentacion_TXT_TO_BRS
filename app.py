@@ -6,6 +6,7 @@ import smtplib
 from email.message import EmailMessage
 import openpyxl
 import re 
+import time
 
 # 1. Configuración de página y credenciales
 st.set_page_config(page_title="Generador de BRS", page_icon="⚙️")
@@ -141,8 +142,8 @@ def enviar_correo(email_dest, adjuntos):
         smtp.send_message(msg)
 
 # 3. Botón de ejecución
+# 3. Botón de ejecución
 if st.button("🚀 Procesar Plantillas y Enviar"):
-    # Validaciones antes de ejecutar
     faltan_nombres = any(not nombre.strip() for nombre in nombres_tablas.values())
     
     if not email_destino:
@@ -155,7 +156,8 @@ if st.button("🚀 Procesar Plantillas y Enviar"):
         with st.spinner("Leyendo consultas e inyectando datos en tu plantilla..."):
             archivos_excel_generados = []
             
-            for archivo in archivos_subidos:
+            # Usamos enumerate para saber el número de archivo actual
+            for index, archivo in enumerate(archivos_subidos):
                 nombre_reporte = nombres_tablas[archivo.name]
                 st.write(f"⏳ Analizando: {archivo.name} -> Tabla: {nombre_reporte}...")
                 
@@ -172,10 +174,23 @@ if st.button("🚀 Procesar Plantillas y Enviar"):
                     nombre_final = f"BRS_{nombre_reporte.replace(' ', '_')}.xlsx"
                     archivos_excel_generados.append((nombre_final, excel_bytes))
                     
+                    # --- FRENO AUTOMÁTICO ---
+                    # Si el archivo fue exitoso y no es el último de la lista, esperamos 15 segundos
+                    if index < len(archivos_subidos) - 1:
+                        st.info("⏱️ Pausa de seguridad de 15s para no exceder el límite gratuito de Google...")
+                        time.sleep(15)
+                        
                 except Exception as e:
-                    st.error(f"Error procesando el archivo {archivo.name}: {e}")
+                    # Capturamos el error 429 por si la cuota global se excede de todos modos
+                    if "429" in str(e):
+                        st.warning("Límite de velocidad detectado. Pausando 25 segundos...")
+                        time.sleep(25)
+                        st.error(f"El archivo {archivo.name} falló por cuota. Procesa este archivo nuevamente más tarde.")
+                    else:
+                        st.error(f"Error procesando el archivo {archivo.name}: {e}")
             
             if archivos_excel_generados:
                 st.write("📧 Enviando correo con adjuntos...")
                 enviar_correo(email_destino, archivos_excel_generados)
                 st.success(f"¡Éxito! Se han enviado {len(archivos_excel_generados)} archivos formateados a {email_destino}.")
+            
