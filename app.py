@@ -31,32 +31,14 @@ if archivos_subidos:
         # Genera un input text por cada archivo subido
         nombres_tablas[archivo.name] = st.text_input(f"Nombre para '{archivo.name}':", key=archivo.name)
 
-
 def analizar_sql_con_gemini(sql_query):
-    """Busca dinámicamente los modelos activos en tu cuenta y extrae el JSON."""
+    """Utiliza el modelo más reciente recomendado por la API de Google."""
     
-    # 1. Obtener la lista real de modelos que Google permite usar hoy con tu API Key
-    modelos_validos = []
-    for m in genai.list_models():
-        if 'generateContent' in m.supported_generation_methods:
-            modelos_validos.append(m.name)
-            
-    if not modelos_validos:
-        raise Exception("Error crítico: Tu API Key no tiene permisos para usar modelos de texto.")
-        
-    # 2. Elegir el mejor modelo disponible (buscamos 'flash' por velocidad, luego 'pro')
-    modelo_elegido = modelos_validos[0] # Tomamos el primero de la lista como base
-    for m_name in modelos_validos:
-        if 'flash' in m_name.lower():
-            modelo_elegido = m_name
-            break # Si encontramos un flash, nos quedamos con ese
-        elif 'pro' in m_name.lower() and 'vision' not in m_name.lower():
-            modelo_elegido = m_name
-            
-    # Esto te mostrará en la web qué modelo encontró y seleccionó para que lo compruebes
-    st.info(f"✅ Modelo auto-detectado y en uso: {modelo_elegido}")
+    # Usar explícitamente el modelo que solicita la API
+    modelo_elegido = 'gemini-3.8-flash'
     
-    # 3. Inicializar el modelo con el nombre exacto que Google nos acaba de dar
+    st.info(f"✅ Modelo en uso: {modelo_elegido}")
+    
     model = genai.GenerativeModel(modelo_elegido)
     
     prompt = f"""
@@ -78,7 +60,7 @@ def analizar_sql_con_gemini(sql_query):
     {sql_query}
     """
     
-    # 4. Generación y limpieza segura del JSON
+    # Generación y limpieza segura del JSON
     response = model.generate_content(prompt)
     texto_limpio = response.text.strip()
     
