@@ -43,87 +43,111 @@ if archivos_subidos:
 else:
     boton_procesar = False
 
+def obtener_modelos_activos():
+    """Consulta directamente a Google qué modelos existen hoy en tu cuenta para no adivinar nombres."""
+    url_modelos = f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_API_KEY}"
+    try:
+        resp = requests.get(url_modelos, timeout=15)
+        if resp.status_code == 200:
+            datos = resp.json().get("models", [])
+            candidatos = []
+            for m in datos:
+                metodos = m.get("supportedGenerationMethods", [])
+                nombre = m.get("name", "").replace("models/", "")
+                # Filtramos solo modelos de generación de texto (excluimos embeddings, imagen, audio, o modelos viejos 1.5/2.0/2.5)
+                if "generateContent" in metodos and "gemini" in nombre:
+                    if not any(x in nombre for x in ["1.0", "1.5", "2.0", "2.5", "vision", "embedding", "imagen", "tts", "audio"]):
+                        candidatos.append(nombre)
+            
+            # Ordenamos para priorizar flash/lite primero, pero dejando pro u otros como respaldo real
+            candidatos.sort(key=lambda x: (0 if "flash" in x else 1, x))
+            if candidatos:
+                return candidatos
+    except Exception:
+        pass
+    return ["gemini-3.8-flash"]
+
 
 def analizar_sql_con_gemini(sql_query):
     """
-    Llama a la API de Gemini por HTTP directo (REST).
-    Incluye manejo de servidores ocupados (503) y cambio automático de modelo si hay saturación.
+    Llama a la API de Gemini sin Constrained Decoding (evita el 503 en SQLs largos)
+    y rota entre los modelos reales activos de la cuenta si un servidor está lleno.
     """
+    modelos_reales = obtener_modelos_activos()
+    
     prompt = f"""
-    Eres un Analista de Datos experto. Analiza el siguiente SQL y extrae la información para un BRS.
-    Identifica únicamente los campos del SELECT principal.
-    Devuelve ÚNICAMENTE un objeto JSON válido con esta estructura exacta (sin markdown ni texto extra):
+Eres un Analista de Datos experto. Analiza el siguiente SQL y extrae la información para un BRS.
+Identifica únicamente los campos del SELECT principal.
+Devuelve ÚNICAMENTE un objeto JSON válido con esta estructura exacta (sin texto adicional antes ni después):
+{{
+  "campos": [
     {{
-      "campos": [
-        {{
-          "columna": "nombre o alias del campo en el select principal",
-          "termino_negocio": "explicación clara en lenguaje de negocio (ej. Es el ID de la Póliza)",
-          "descripcion": "explicación detallada de la regla, lógica o CASE. Si es un campo directo sin lógica compleja, repite exactamente el valor de termino_negocio.",
-          "fuente_datos": "nombre real de la tabla origen de donde nace este campo (resuelve los alias)"
-        }}
-      ],
-      "tablas_origen": ["TABLA_ORIGEN_1", "TABLA_ORIGEN_2"]
+      "columna": "nombre o alias del campo en el select principal",
+      "termino_negocio": "explicación clara en lenguaje de negocio (ej. Es el ID de la Póliza)",
+      "descripcion": "explicación detallada de la regla, lógica o CASE. Si es un campo directo sin lógica compleja, repite exactamente el valor de termino_negocio.",
+      "fuente_datos": "nombre real de la tabla origen de donde nace este campo (resuelve los alias)"
     }}
+  ],
+  "tablas_origen": ["TABLA_ORIGEN_1", "TABLA_ORIGEN_2"]
+}}
+
+Consulta SQL:
+{sql_query}
+"""
     
-    Consulta SQL:
-    {sql_query}
-    """
-    
+    # IMPORTANTE: Quitamos "responseMimeType": "application/json" porque causa Error 503 
+    # en los servidores de Google cuando el SQL de entrada es grande o complejo.
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
-            "responseMimeType": "application/json",
             "temperature": 0.1
         }
     }
     
     headers = {"Content-Type": "application/json"}
     
-    # Lista de modelos: si el principal está saturado (503), prueba con las variantes
-    modelos_disponibles = [
-        "gemini-3.8-flash",
-        "gemini-3.8-flash-lite",
-        "gemini-3.8-pro"
-    ]
+    # Mostramos en pequeño qué modelos reales detectó en tu cuenta por transparencia
+    st.caption(f"🔍 Modelos disponibles detectados en tu cuenta: `{', '.join(modelos_reales)}`")
     
-    for intento in range(4):
-        # Rotamos o mantenemos el modelo según el intento
-        modelo_actual = modelos_disponibles[intento % len(modelos_disponibles)]
+    max_intentos = max(4, len(modelos_reales) * 2)
+    
+    for intento in range(max_intentos):
+        modelo_actual = modelos_reales[intento % len(modelos_reales)]
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{modelo_actual}:generateContent?key={GEMINI_API_KEY}"
         
         response = requests.post(url, headers=headers, json=payload, timeout=120)
         
-        # Caso 1: Éxito total
         if response.status_code == 200:
             resultado = response.json()
             texto_respuesta = resultado["candidates"][0]["content"]["parts"][0]["text"].strip()
             
-            if texto_respuesta.startswith("```"):
-                texto_respuesta = re.sub(r"^```(?:json)?|```$", "", texto_respuesta, flags=re.IGNORECASE).strip()
+            # Extraemos exactamente desde la primera llave '{' hasta la última '}'
+            inicio = texto_respuesta.find("{")
+            fin = texto_respuesta.rfind("}")
+            if inicio != -1 and fin != -1:
+                json_limpio = texto_respuesta[inicio:fin+1]
+                return json.loads(json_limpio)
+            else:
+                raise Exception(f"La respuesta no contenía un JSON válido: {texto_respuesta[:200]}")
                 
-            return json.loads(texto_respuesta)
-            
-        # Caso 2: Servidor de Google saturado (503 / 500) -> Esperar 8 seg y probar siguiente
         elif response.status_code in [500, 502, 503, 504]:
-            espera_servidor = 8 * (intento + 1)
-            st.warning(f"⚠️ El servidor de `{modelo_actual}` tiene alta demanda en Google (503). Reintentando en {espera_servidor}s (Intento {intento+1}/4)...")
+            espera_servidor = 6
+            st.warning(f"⚠️ `{modelo_actual}` con alta demanda (503). Cambiando al siguiente modelo disponible en {espera_servidor}s (Intento {intento+1}/{max_intentos})...")
             time.sleep(espera_servidor)
             
-        # Caso 3: El modelo de respaldo no existe en tu cuenta (404) -> Saltar de inmediato al siguiente sin esperar
         elif response.status_code == 404:
+            # Si algún modelo de la lista fue deprecado, lo descartamos
             continue
             
-        # Caso 4: Límite de cuota por minuto (429)
         elif response.status_code == 429:
-            tiempo_espera = 25
-            st.warning(f"⏳ Cuota por minuto alcanzada. Esperando {tiempo_espera}s para continuar (Intento {intento+1}/4)...")
+            tiempo_espera = 22
+            st.warning(f"⏳ Límite por minuto alcanzado en `{modelo_actual}`. Esperando {tiempo_espera}s...")
             time.sleep(tiempo_espera)
             
         else:
-            raise Exception(f"Error HTTP {response.status_code}: {response.text}")
+            raise Exception(f"Error HTTP {response.status_code} en {modelo_actual}: {response.text}")
             
-    raise Exception("Los servidores de Google están experimentando saturación temporal tras varios intentos. Por favor intenta en un par de minutos.")
-
+    raise Exception("Todos los modelos disponibles están saturados en Google en este momento. Intenta de nuevo en un par de minutos.")
 
 def copiar_estilo_fila(ws, fila_origen, fila_destino, max_col=5):
     """Copia bordes, colores, fuentes y alineación de la fila 10 a las filas nuevas."""
